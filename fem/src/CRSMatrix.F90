@@ -1593,6 +1593,10 @@ SUBROUTINE CRS_RowSumInfo( A, Values )
 !------------------------------------------------------------------------------
 
 
+
+
+
+   
 !------------------------------------------------------------------------------
 !> Add another matrix B to matrix A, and eliminate B
 !------------------------------------------------------------------------------
@@ -1785,6 +1789,43 @@ SUBROUTINE CRS_RowSumInfo( A, Values )
 !------------------------------------------------------------------------------
 
 
+
+!------------------------------------------------------------------------------
+!>    Matrix vector product (v = A^T u) for a complex matrix given in CRS format.
+!------------------------------------------------------------------------------
+  SUBROUTINE CRS_ComplexTransposeMatrixVectorMultiply( A,u,v )
+!------------------------------------------------------------------------------
+    COMPLEX(KIND=dp), DIMENSION(*), INTENT(IN) :: u   !< Vector to be multiplied
+    COMPLEX(KIND=dp), DIMENSION(*), INTENT(OUT) :: v  !< Result vector
+    TYPE(Matrix_t), INTENT(IN) :: A                !< Structure holding matrix
+!------------------------------------------------------------------------------
+    INTEGER, POINTER  CONTIG :: Cols(:),Rows(:)
+    REAL(KIND=dp), POINTER  CONTIG :: Values(:)
+    INTEGER :: i,j,k,n
+    COMPLEX(KIND=dp) :: s, rsum
+
+!------------------------------------------------------------------------------
+     n = A % NumberOfRows / 2
+     Rows   => A % Rows
+     Cols   => A % Cols
+     Values => A % Values
+
+     v(1:n) = CMPLX( 0.0d0, 0.0d0,KIND=dp )
+     DO i=1,n
+       !DIR$ IVDEP
+       DO j=Rows(2*i-1),Rows(2*i)-1,2
+         s = CMPLX( Values(j), -Values(j+1), KIND=dp )
+         k = (Cols(j)+1)/2
+         v(k) = v(k) + u(i) * s
+       END DO
+     END DO
+!------------------------------------------------------------------------------
+   END SUBROUTINE CRS_ComplexTransposeMatrixVectorMultiply
+!------------------------------------------------------------------------------
+
+
+
+  
 !-------------------------------------------------------------------------------
   SUBROUTINE CRS_ApplyProjector( PMatrix, u, uperm, v, vperm, Trans )
 !-------------------------------------------------------------------------------
@@ -4439,8 +4480,8 @@ SUBROUTINE CRS_RowSumInfo( A, Values )
 !------------------------------------------------------------------------------
 
     INTEGER, DIMENSION(*), INTENT(IN) :: ipar      !< Structure holding info HUTIter-iterative solver package
-    COMPLEX(KIND=dp), INTENT(IN) :: u(HUTI_NDIM)      !< vector to multiply u
-    COMPLEX(KIND=dp) :: v(HUTI_NDIM)  !< result vector
+    COMPLEX(KIND=dp), INTENT(IN) :: u(HUTI_NDIM)   !< vector to multiply u
+    COMPLEX(KIND=dp) :: v(HUTI_NDIM)               !< result vector
 
 !------------------------------------------------------------------------------
     INTEGER, POINTER :: Cols(:),Rows(:)

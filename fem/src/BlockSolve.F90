@@ -1237,6 +1237,105 @@ CONTAINS
 !------------------------------------------------------------------------------
   
 
+  !------------------------------------------------------------------------------
+  SUBROUTINE BlockMatrixVectorProdZ( u,v,ipar )
+!------------------------------------------------------------------------------
+    COMPLEX(KIND=dp), INTENT(in) :: u(*)
+    COMPLEX(KIND=dp), INTENT(out) :: v(*)
+    INTEGER, INTENT(in) :: ipar(*)
+    
+    INTEGER :: i,j,k,NoVar,i1,i2,j1,j2
+    COMPLEX(KIND=dp), ALLOCATABLE :: s(:)
+    INTEGER :: maxsize,ndofs
+    INTEGER, POINTER :: Offset(:)
+    REAL(KIND=dp) :: nrm
+    TYPE(Matrix_t), POINTER :: A
+
+    REAL(KIND=dp), POINTER :: b(:)
+    LOGICAL :: DoSum 
+    
+    CALL Info('BlockMatrixVectorProd','Starting block matrix multiplication',Level=20)
+    
+    NoVar = TotMatrix % NoVar
+    Offset => TotMatrix % Offset
+    MaxSize = TotMatrix % MaxSize
+
+    IF (isParallel) THEN
+      IF(.NOT.ASSOCIATED(TotMatrix % SubMatrix(1,NoVar) % Mat % ParMatrix)) THEN
+        IF(.NOT.ASSOCIATED(SolverMatrix)) THEN
+          CALL Fatal('BlockMatrixVectorProd','No matrix to apply.')
+        ELSE
+          !CALL ParallelMatrixVector(SolverMatrix, u(1:ipar(3)), v(1:ipar(3)))
+        END IF
+        RETURN
+      END IF
+    END IF
+
+    ALLOCATE( s(MaxSize/2) )
+
+    ! Use offset of half size for complex system.
+    ! Remember to multiply by two in the end!
+    offset = offset / 2
+
+    v(1:offset(NoVar+1)) = 0
+    
+    DO i=1,NoVar
+      DO j=1,NoVar
+        s = 0._dp
+
+        j1 = offset(j)+1
+        j2 = offset(j+1)
+
+        DoSum = .FALSE.
+        
+        A => TotMatrix % SubMatrix(i,j) % Mat
+        IF( A % NumberOfRows > 0 ) THEN
+        
+          CALL Info('BlockMatrixVectorProdZ','Multiplying with submatrix ('&
+              //TRIM(I2S(i))//','//TRIM(I2S(j))//')',Level=8)          
+          
+          IF (isParallel) THEN
+            CALL Fatal('BlockMatrixVectorProdZ','Do matrix vector in parallel!')
+!            CALL ParallelMatrixVector( A, u(j1:j2), s  )
+          ELSE
+            CALL CRS_ComplexMatrixVectorMultiply( A, u(j1:j2), s )
+          END IF
+          DoSum = .TRUE.
+
+        ELSE IF( TotMatrix % SubMatrixTranspose(j,i) ) THEN          
+          A => TotMatrix % SubMatrix(j,i) % Mat
+          IF( A % NumberOfRows > 0 ) THEN            
+            CALL Info('BlockMatrixVectorProdZ','Multiplying with transpose of submatrix ('&
+                //TRIM(I2S(j))//','//TRIM(I2S(i))//')',Level=12)
+            
+            IF (isParallel) THEN
+              CALL Fatal('BlockMatrixVectorProdZ','Do transpose in parallel!')
+            ELSE          
+              CALL CRS_ComplexTransposeMatrixVectorMultiply( A, u(j1:j2), s )
+            END IF
+            DoSum = .TRUE.
+          END IF
+        END IF
+                
+        IF( DoSum ) THEN
+          DO k=1,offset(i+1)-offset(i)
+            v(k+offset(i)) = v(k+offset(i)) + s(k)
+          END DO
+        END IF
+      END DO
+
+    END DO
+
+    ! Returning to original real system size!
+    offset = offset * 2
+            
+    CALL Info('BlockMatrixVectorProdZ','Finished block matrix multiplication',Level=20)
+!------------------------------------------------------------------------------
+  END SUBROUTINE BlockMatrixVectorProdZ
+!------------------------------------------------------------------------------
+
+
+  
 !------------------------------------------------------------------------------
 !> Perform block preconditioning for Au=v by solving all the individual diagonal problems.
 !> Has to be called outside the module by Krylov methods.
@@ -1246,7 +1345,7 @@ CONTAINS
     REAL(KIND=dp), TARGET, INTENT(in) :: v(*)
     INTEGER :: ipar(*)
 !---------------------------------------------------------------------------------
-    REAL(KIND=dp), POINTER :: rtmp(:),vtmp(:),xtmp(:),b(:), x(:), rhs_save(:), a_rhs_save(:)
+    REAL(KIND=dp), POINTER :: rtmp(:),vtmp(:),xtmp(:),b(:), x(:), rhs_save(:)
     INTEGER :: i,j,k,l,NoVar
     TYPE(Solver_t), POINTER :: Solver, Solver_save, ASolver
     INTEGER, POINTER :: Offset(:)
@@ -1257,10 +1356,8 @@ CONTAINS
 
     LOGICAL :: GotOrder, BlockGS, Found, NS, SkipCompChange, ScaleSystem, DoSum
     CHARACTER(LEN=MAX_NAME_LEN) :: str
-#ifndef USE_ISO_C_BINDINGS
     INTEGER(KIND=AddrInt) :: AddrFunc
-#else
-    INTEGER(KIND=AddrInt) :: AddrFunc
+#ifdef USE_ISO_C_BINDINGS
     EXTERNAL :: AddrFunc
 #endif
 
@@ -1362,9 +1459,6 @@ CONTAINS
         END IF
       END IF
 #endif
-      !A_rhs_save => A_rhs	
-      !A % RHS => b
-
       ! Reuse block preconditioner from the first block to other components
       !--------------------------------------------------------------------
       IF( ListGetLogical( Params,'Block Prec Reuse',Found) ) THEN
@@ -1542,6 +1636,295 @@ CONTAINS
 
 
 
+!------------------------------------------------------------------------------
+!> Perform block preconditioning for Au=v by solving all the individual diagonal problems.
+!> Has to be called outside the module by Krylov methods.
+!------------------------------------------------------------------------------
+  SUBROUTINE BlockMatrixPrecZ( u,v,ipar )    
+    COMPLEX(KIND=dp), TARGET, INTENT(out) :: u(*)
+    COMPLEX(KIND=dp), TARGET, INTENT(in) :: v(*)
+    INTEGER :: ipar(*)
+!---------------------------------------------------------------------------------
+    COMPLEX(KIND=dp), POINTER :: rtmp(:),vtmp(:),xtmp(:),b(:), x(:)
+    REAL(KIND=dp), POINTER :: bre(:), xre(:)
+    REAL(KIND=dp), POINTER :: rhs_save(:)
+    
+    INTEGER :: i,j,k,l,NoVar
+    TYPE(Solver_t), POINTER :: Solver, Solver_save, ASolver
+    INTEGER, POINTER :: Offset(:)
+    TYPE(ValueList_t), POINTER :: Params
+    INTEGER, POINTER :: BlockOrder(:)
+    TYPE(Matrix_t), POINTER :: A, mat_save
+    TYPE(Variable_t), POINTER :: Var, Var_save
+
+    LOGICAL :: GotOrder, BlockGS, Found, NS, SkipCompChange, ScaleSystem, DoSum
+    CHARACTER(LEN=MAX_NAME_LEN) :: str
+    INTEGER(KIND=AddrInt) :: AddrFunc
+#ifdef USE_ISO_C_BINDINGS
+    EXTERNAL :: AddrFunc
+#endif
+
+    CALL Info('BlockMatrixPrecZ','Starting complex block matrix preconditioning',Level=6)
+    
+    Solver => CurrentModel % Solver
+    Params => Solver % Values
+    
+    ! Enable user defined order for the solution of blocks
+    !---------------------------------------------------------------
+    BlockOrder => ListGetIntegerArray( Params,'Block Order',GotOrder)
+    BlockGS = ListGetLogical( Params,'Block Gauss-Seidel',Found)
+    
+    NoVar = TotMatrix % NoVar
+    Solver => TotMatrix % Solver
+    offset => TotMatrix % Offset
+
+    ! Save the initial solver stuff
+    solver_save => Solver
+    var_save => Solver % Variable
+    mat_save => Solver % Matrix
+    rhs_save => Solver % Matrix % RHS
+
+    offset = offset / 2
+    
+    
+#define SOLSYS
+#ifdef SOLSYS
+    IF (isParallel) &
+      ALLOCATE( x(TotMatrix % MaxSize/2), b(TotMatrix % MaxSize/2) )
+#endif
+
+    ALLOCATE( xre(TotMatrix % MaxSize), bre(Totmatrix % MaxSize) )
+    
+    ! Initial guess 
+    !-----------------------------------------
+    u(1:offset(NoVar+1)) = v(1:offset(NoVar+1))
+
+    IF( BlockGS ) THEN
+      ALLOCATE( vtmp(offset(NoVar+1)), rtmp(offset(NoVar+1)), xtmp(offset(NoVar+1)))
+      vtmp(1:offset(NoVar+1)) = v(1:offset(NoVar+1))
+    END IF
+
+
+    CALL ListPushNameSpace('block:')
+
+    DO j=1,NoVar
+      IF( GotOrder ) THEN
+        i = BlockOrder(j)
+      ELSE
+        i = j
+      END IF
+      
+      WRITE(Message,'(A,I0)') 'Solving block: ',i
+      CALL Info('BlockMatrixPrec',Message,Level=6)
+
+      ! Set pointers to the new linear system
+      !-------------------------------------------------------------------
+      Var => TotMatrix % SubVector(i) % Var
+
+      IF( ASSOCIATED( TotMatrix % Subvector(i) % Solver ) ) THEN
+        ASolver => TotMatrix % SubVector(i) % Solver
+        A => ASolver % Matrix
+      ELSE
+        A => TotMatrix % Submatrix(i,i) % PrecMat
+        IF( A % NumberOfRows == 0 ) THEN
+          A => TotMatrix % Submatrix(i,i) % Mat
+        ELSE
+          PRINT *,'Using specialized preconditioning block'
+        END IF      
+        ASolver => Solver
+      END IF
+      
+        
+#ifndef SOLSYS
+      x => u(offset(i)+1:offset(i+1))
+      IF( BlockGS ) THEN
+        b => vtmp(offset(i)+1:offset(i+1))
+      ELSE      
+        b => v(offset(i)+1:offset(i+1))
+      END IF
+#else
+      IF (isParallel) THEN
+        x = 0; b=0
+        l = 0
+        DO k=1,A % NumberofRows
+          IF (Parenv % MyPE==A % ParallelInfo % NeighbourList(k) % Neighbours(1)) THEN
+            l = l+1
+            x(k) = u(offset(i)+l)
+            IF( BlockGS ) THEN
+              b(k) = vtmp(offset(i)+l)
+            ELSE      
+              b(k) = v(offset(i)+l)
+            END IF
+           END IF
+        END DO
+      ELSE
+        x => u(offset(i)+1:offset(i+1))
+        IF( BlockGS ) THEN
+          b => vtmp(offset(i)+1:offset(i+1))
+        ELSE      
+          b => v(offset(i)+1:offset(i+1))
+        END IF
+      END IF
+#endif
+      ! Reuse block preconditioner from the first block to other components
+      !--------------------------------------------------------------------
+      IF( ListGetLogical( Params,'Block Prec Reuse',Found) ) THEN
+        DO k = 1, NoVar
+          IF( k == i ) CYCLE
+          IF( CRS_CopyMatrixPrec( TotMatrix % Submatrix(k,k) % Mat, A ) ) EXIT
+        END DO
+      END IF
+
+      CALL ListPushNameSpace('block '//TRIM(i2s(i))//TRIM(i2s(i))//':')
+
+      SkipCompChange = ListGetLogical( Params,'Skip Compute Nonlinear Change',Found)
+      CALL ListAddLogical( Params,'Skip Compute Nonlinear Change',.TRUE.)
+      
+      IF (isParallel) THEN
+#ifndef SOLSYS
+        !GlobalData => A % ParMatrix
+        !GlobalMatrix => GlobalData % SplittedMatrix % InsideMatrix
+        !GlobalMatrix % MatVecSubr = A % MatVecSubr
+        !GlobalMatrix % Ematrix => A
+        !GlobalMatrix % COMPLEX = A % COMPLEX
+ 
+        !CALL IterSolver( GlobalMatrix, x,b, &
+        !    ASolver,MatvecF=AddrFunc(SParMatrixVector), &
+        !    DotF=AddrFunc(SParDotProd), NormF=AddrFunc(SParNorm))
+#else
+        !CALL SolveLinearSystem( A, b, x, Var % Norm, Var % DOFs, ASolver )
+#endif
+      ELSE
+        
+        !ScaleSystem = ListGetLogical( Params,'block: Linear System Scaling', Found )
+        !IF(.NOT. Found) ScaleSystem = .TRUE.
+        !IF ( ScaleSystem ) CALL ScaleLinearSystem(ASolver,A,b,x )
+
+        bre(1::2) = REAL( b ); bre(2::2) = AIMAG( b ) 
+        xre(1::2) = REAL( x ); xre(2::2) = AIMAG( x ) 
+
+        CALL SolveLinearSystem( A, bre, xre, Var % Norm, Var % DOFs, ASolver )
+
+        x = CMPLX( xre(1::2), xre(2::2) )
+        
+        !IF( ScaleSystem ) CALL BackScaleLinearSystem(ASolver,A,b,x)       
+      END IF        
+
+#ifdef SOLSYS
+      !IF (isParallel) THEN
+      !  l = 0
+      !  DO k=1,A % NumberofRows
+      !    IF (Parenv % MyPE==A % ParallelInfo % NeighbourList(k) % Neighbours(1)) THEN
+      !      l = l+1
+      !      x(l) = x(k)
+      !      u(offset(i)+l) = x(l)
+      !    END IF
+      !  END DO
+      !END IF
+#endif
+
+ 
+      !---------------------------------------------------------------------
+      IF( BlockGS ) THEN        
+        CALL Info('BlockMatrixPrec','Updating block r.h.s',Level=5)
+      
+        DO l=j+1,NoVar
+          IF( GotOrder ) THEN
+            k = BlockOrder(l)
+          ELSE
+            k = l
+          END IF
+
+          WRITE( str,'(A,I0,I0)') 'Block Gauss-Seidel Passive ',k,i
+          IF( ListGetLogical( Params, str, Found ) ) CYCLE
+        
+          CALL Info('BlockMatrixPrec','Updating r.h.s for component '//TRIM(I2S(k)),Level=15)
+          
+          ! The residual is used only as a temporary vector
+          !-------------------------------------------------------------
+          DoSum = .FALSE.
+
+          IF (isParallel) THEN
+            !IF(ASSOCIATED(TotMatrix % SubMatrix(k,i) % Mat % ParMatrix)) THEN
+            !  CALL ParallelMatrixVector(TotMatrix % SubMatrix(k,i) % Mat,x,rtmp )
+            !  DoSum = .TRUE.
+            !ELSE IF (ASSOCIATED(SolverMatrix)) THEN
+            !  xtmp=0
+            !  xtmp(offset(i)+1:offset(i+1))=x(offset(i)+1:offset(i+1))
+            !  CALL ParallelMatrixVector(SolverMatrix,xtmp,rtmp)
+            !  rtmp(1:offset(k+1)-offset(k))=rtmp(offset(k)+1:offset(k+1))
+            !  DoSum = .TRUE.
+            !ELSE
+            !  CALL Fatal('BlockKrylovIter','No matrix to apply.')
+            !END IF
+
+            !IF( TotMatrix % SubMatrixTranspose(i,k) ) THEN
+            !  CALL Fatal('','Do transpose in parallel!')
+            !END IF
+
+          ELSE
+
+            A => TotMatrix % Submatrix(k,i) % Mat            
+            IF( A % NumberOfRows > 0 ) THEN
+              CALL CRS_ComplexMatrixVectorMultiply(A,x,rtmp )
+              DoSum = .TRUE.
+            ELSE IF( TotMatrix % SubMatrixTranspose(i,k) ) THEN
+              A => TotMatrix % SubMatrix(i,k) % Mat
+              IF( A % NumberOfRows >  0 ) THEN
+                CALL Info('BlockMatrixPrec','Multiplying with transpose of submatrix ('&
+                    //TRIM(I2S(i))//','//TRIM(I2S(k))//')',Level=8)
+                CALL CRS_ComplexTransposeMatrixVectorMultiply( A, x, rtmp )
+                DoSum = .TRUE.
+              END IF
+            END IF
+
+          END IF
+
+          IF( DoSum ) THEN
+            ! Up-date the off-diagonal entries to the r.h.s. 
+            vtmp(offset(k)+1:offset(k+1)) = vtmp(offset(k)+1:offset(k+1)) &
+                - rtmp(1:offset(k+1)-offset(k))
+          END IF                 
+
+        END DO ! l=j+1,NoVar
+        
+      END IF
+
+      CALL ListPopNameSpace() ! block ij:
+      
+    END DO ! j=1,NoVar
+
+#ifdef SOLSYS
+    IF (isParallel) DEALLOCATE(x,b)
+#undef SOLSYS
+#endif
+
+    CALL ListPopNameSpace('block:') ! block:
+
+    CALL ListAddLogical( Params,'Linear System Refactorize',.FALSE. )
+    CALL ListAddLogical( Params,'Skip Compute Nonlinear Change',SkipCompChange)
+
+    offset = offset * 2
+    
+    Solver => Solver_save
+    Solver % Matrix => mat_save
+    Solver % Matrix % RHS => rhs_save
+    Solver % Variable => Var_save
+
+    IF( BlockGS ) THEN
+      DEALLOCATE( vtmp, rtmp ) 
+    END IF
+
+    DEALLOCATE( xre, bre )
+
+    
+    CALL Info('BlockMatrixPrecZ','Finished complex block matrix preconditioning',Level=6)
+    
+  END SUBROUTINE BlockMatrixPrecZ
+
+
+  
+
   !> This call takes care of Jacobi & Gauss Seidel block methods. 
   !-----------------------------------------------------------------
   SUBROUTINE BlockStandardIter( Solver, MaxChange )
@@ -1713,11 +2096,8 @@ CONTAINS
 
     TYPE(Solver_t) :: Solver
     REAL(KIND=dp) :: MaxChange
-
-#ifndef USE_ISO_C_BINDINGS
     INTEGER(KIND=AddrInt) :: AddrFunc
-#else
-    INTEGER(KIND=AddrInt) :: AddrFunc
+#ifdef USE_ISO_C_BINDINGS
     EXTERNAL :: AddrFunc
 #endif
     INTEGER(KIND=AddrInt) :: iterProc,precProc, mvProc,dotProc,nmrProc, zero=0
@@ -1732,7 +2112,7 @@ CONTAINS
     INTEGER :: Rounds, OutputInterval, PolynomialDegree
     INTEGER, POINTER :: Offset(:),poffset(:),BlockStruct(:)
     INTEGER :: i,j,k,l,ia,ib,istat
-    LOGICAL :: LS, BlockAV,Found
+    LOGICAL :: LS, BlockAV,Found,ComplexSystem
 
     CALL Info('BlockKrylovIter','Starting block system iteration',Level=8)
     
@@ -1745,6 +2125,9 @@ CONTAINS
     ndim = TotMatrix % TotSize 
     NoVar = TotMatrix % NoVar
 
+    ComplexSystem = ListGetLogical(Params,'Linear System Complex',Found)
+
+    
     CALL Info('BlockSolver','Allocating temporal vectors for block system of size: '&
         //TRIM(I2S(ndim)),Level=8)
 
@@ -1830,9 +2213,14 @@ CONTAINS
     !----------------------------------------------------------------------
     CALL ListAddLogical(Params,'Linear System Free Factorization',.FALSE.)
 
-    precProc = AddrFunc(BlockMatrixPrec)
-    mvProc = AddrFunc(BlockMatrixVectorProd)       
-
+    IF( ComplexSystem ) THEN
+      precProc = AddrFunc(BlockMatrixPrecZ)
+      mvProc = AddrFunc(BlockMatrixVectorProdZ)       
+    ELSE
+      precProc = AddrFunc(BlockMatrixPrec)
+      mvProc = AddrFunc(BlockMatrixVectorProd)       
+    END IF
+      
     prevXnorm = SQRT( SUM( b**2 ) )
     WRITE( Message,'(A,ES12.3)') 'Rhs norm at start: ',PrevXnorm
     CALL Info('BlockKrylovIter',Message,Level=10)
