@@ -1361,7 +1361,6 @@ END INTERFACE
      DO WHILE( ASSOCIATED( Mesh ) )
        
        IF( InfoActive( 20 ) ) THEN
-         PRINT *,'InitCond mesh:',TRIM(Mesh % Name)
          Var => Mesh % Variables
          DO WHILE( ASSOCIATED(Var) ) 
            IF( ListCheckPresentAnyIC( CurrentModel, Var % Name ) ) THEN
@@ -1429,7 +1428,6 @@ END INTERFACE
          END DO
        END DO
 
-       PRINT *,'InitCond:',ThingsToDo
        
        ! And now do the ordinary fields
        !--------------------------------
@@ -1507,12 +1505,6 @@ END INTERFACE
                  END DO
                END IF
 
-               IF( t == 1 ) THEN
-                 PRINT *,'InitCond:',Work(1:n),GotIt,DOFs,TRIM(Var % Name),n,Indexes(1:n),ASSOCIATED(Var%Solver), &
-                     Var % Solver % SolverId
-               END IF
-
-               
                IF ( Transient .AND. Solver % TimeOrder==2 ) THEN
                  Work(1:n) = GetReal( IC, TRIM(Var % Name) // ' Velocity', GotIt )
                  IF ( GotIt ) THEN
